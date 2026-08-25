@@ -89,8 +89,17 @@ StatusCode CaloTopoClusterFCCee::initialize() {
   m_decoder = new dd4hep::DDSegmentation::BitFieldCoder(m_systemEncoding);
   m_indexSystem = m_decoder->index("system");
 
-  // initialise the list of metadata for the clusters
+  if (!m_inputEnergyNames.value().empty() && m_inputEnergyNames.value().size() != m_cellCollections.value().size()) {
+    error() << "inputEnergyNames must be empty or have one entry per input cell collection" << endmsg;
+    return StatusCode::FAILURE;
+  }
+
+  // Initialise cluster metadata. Optional per-input sums allow dual-readout
+  // clients to retain both measurements while clustering each physical cell
+  // only once.
   std::vector<std::string> shapeParameterNames = {"dR_over_E"};
+  shapeParameterNames.insert(shapeParameterNames.end(), m_inputEnergyNames.value().begin(),
+                             m_inputEnergyNames.value().end());
   k4FWCore::putCollectionParameter(m_clusterCollection.objKey(), edm4hep::labels::ShapeParameterNames,
                                    shapeParameterNames, this);
 
@@ -126,26 +135,37 @@ StatusCode CaloTopoClusterFCCee::execute(const EventContext&) const {
     outClusterCells = m_clusterCellsCollection.createAndPut();
   }
 
-  // get input collection with calorimeter cells and build cell cache and flat cell map
-  std::unordered_map<uint64_t, const edm4hep::CalorimeterHit> allCellsMap;
+  // Merge equal detector cellIDs across input collections before clustering.
+  // IDEA's Cherenkov and scintillation collections are two measurements of
+  // the same physical cells; treating them independently makes the retained
+  // signal depend on input order.
+  std::unordered_map<uint64_t, edm4hep::MutableCalorimeterHit> allCellsMap;
   allCellsMap.reserve(2000000);
   std::unordered_map<uint64_t, FastCell> allCells;
   allCells.reserve(2000000);
+  std::vector<std::unordered_map<uint64_t, double>> inputCellEnergies(m_cellCollectionHandles.size());
 
-  for (auto& hdl : m_cellCollectionHandles) {
-    const auto* coll = hdl->get();
+  for (size_t ih = 0; ih < m_cellCollectionHandles.size(); ++ih) {
+    const auto* coll = m_cellCollectionHandles[ih]->get();
     for (const auto& hit : *coll) {
-      // cache EDM hit
       const uint64_t cID = hit.getCellID();
-      allCellsMap.emplace(cID, hit);
-
-      // create fast flat cell
-      float energy = hit.getEnergy();
-      auto pos = hit.getPosition();
-      auto [rms, offset] = m_noiseTool->getNoisePerCell(cID);
-      float sovern = (rms > 0.) ? (std::fabs(energy - offset) / rms) : 999999.;
-      allCells.emplace(cID, FastCell{cID, energy, (float)pos.x, (float)pos.y, (float)pos.z, 0, sovern});
+      inputCellEnergies[ih][cID] += hit.getEnergy();
+      auto [cellIt, inserted] = allCellsMap.try_emplace(cID, hit.clone());
+      if (inserted) {
+        cellIt->second.setEnergy(0.);
+        cellIt->second.setEnergyError(0.);
+      }
+      cellIt->second.setEnergy(cellIt->second.getEnergy() + hit.getEnergy());
+      cellIt->second.setEnergyError(std::hypot(cellIt->second.getEnergyError(), hit.getEnergyError()));
     }
+  }
+
+  for (const auto& [cID, hit] : allCellsMap) {
+    const float energy = hit.getEnergy();
+    const auto pos = hit.getPosition();
+    auto [rms, offset] = m_noiseTool->getNoisePerCell(cID);
+    float sovern = (rms > 0.) ? (std::fabs(energy - offset) / rms) : 999999.;
+    allCells.emplace(cID, FastCell{cID, energy, (float)pos.x, (float)pos.y, (float)pos.z, 0, sovern});
   }
 
   // skip event if no cells to cluster
@@ -195,12 +215,19 @@ StatusCode CaloTopoClusterFCCee::execute(const EventContext&) const {
   for (const auto& [clusterId, cluster] : clusters) {
 
     double clusterEnergy = 0.;
+    std::vector<double> clusterInputEnergies(m_cellCollectionHandles.size(), 0.);
     std::unordered_map<int, int> system;
     system.reserve(4);
 
     for (const auto& fastcell : cluster) {
 
       clusterEnergy += fastcell.energy;
+      for (size_t ih = 0; ih < inputCellEnergies.size(); ++ih) {
+        const auto energyIt = inputCellEnergies[ih].find(fastcell.cellID);
+        if (energyIt != inputCellEnergies[ih].end()) {
+          clusterInputEnergies[ih] += energyIt->second;
+        }
+      }
       auto systemId = m_decoder->get(fastcell.cellID, m_indexSystem);
       system[int(systemId)]++;
     }
@@ -292,6 +319,11 @@ StatusCode CaloTopoClusterFCCee::execute(const EventContext&) const {
     } else {
       outCluster.setPosition(edm4hep::Vector3f(0., 0., 0.));
       outCluster.addToShapeParameters(0.0);
+    }
+    if (!m_inputEnergyNames.value().empty()) {
+      for (const auto energy : clusterInputEnergies) {
+        outCluster.addToShapeParameters(energy);
+      }
     }
 
     outClusters->push_back(outCluster);
