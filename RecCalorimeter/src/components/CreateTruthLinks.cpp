@@ -90,6 +90,11 @@ StatusCode CreateTruthLinks::execute(const EventContext&) const {
   // retrieve MC particles
   const edm4hep::MCParticleCollection* mcparticles = m_mcparticles.get();
 
+  // Index generated cell-to-particle links by detector cellID. Topological
+  // clusterers may copy hits into a separate collection, where podio
+  // ObjectIDs differ while detector cellIDs remain stable.
+  std::map<uint64_t, std::vector<std::pair<int, double>>> cellParticleIndex;
+
   debug() << "Creating CaloHit <-> MCParticle links : " << endmsg;
 
   // loop over calo<->sim hit collection
@@ -107,6 +112,9 @@ StatusCode CreateTruthLinks::execute(const EventContext&) const {
       debug() << "Processing new sim <-> calo hit link: " << endmsg;
       const auto& simHit = assoc.getTo();
       const auto& caloHit = assoc.getFrom();
+      if (caloHit.getEnergy() <= m_minCellEnergy) {
+        continue;
+      }
       debug() << "Sim hit id and index: " << simHit.id() << " " << simHit.id().index << endmsg;
       debug() << "Calo hit id and index: " << caloHit.id() << " " << caloHit.id().index << endmsg;
       if (nhits[simHit.id().index + ih * (1 << 24)] > 0) {
@@ -463,15 +471,17 @@ StatusCode CreateTruthLinks::execute(const EventContext&) const {
         simHitMapEnergy[mcp.id().index] += e;
       } // end loop over contributions
       double sumw = 0.0; // for debug
-      for (const auto& mcp : *mcparticles) {
+      for (const auto& [index_mcp, energy] : simHitMapEnergy) {
         // create calo hit<->mc particle associations
-        if (simHitMapEnergy[mcp.id().index] > 0) {
+        if (energy > 0) {
+          const auto& mcp = mcparticles->at(index_mcp);
           auto link = caloHitMCParticleLinkCollection->create();
           link.setFrom(caloHit);
           link.setTo(mcp);
-          double w = simHitMapEnergy[mcp.id().index] / caloHit.getEnergy();
+          double w = energy / caloHit.getEnergy();
           sumw += w;
           link.setWeight(w);
+          cellParticleIndex[caloHit.getCellID()].emplace_back(index_mcp, w);
         }
       }
       debug() << "Sum of weights for this calo hit = " << sumw << endmsg;
@@ -524,32 +534,29 @@ StatusCode CreateTruthLinks::execute(const EventContext&) const {
         float eCell = cell.getEnergy();
         ecalohitsum += eCell;
 
-        // loop over hits -> MCParticle links to calculate contribution from given particle
-        // GM, note: original code in
-        // https://github.com/iLCSoft/MarlinReco/blob/02a01cfe6154fa42b31081250bf84c8f8718f0b1/Analysis/RecoMCTruthLink/src/RecoMCTruthLinker.cc#L1167
-        // is quite more complex, and tries to reassign calo->particle links for some rare cases
-        for (const auto& assoc : *caloHitMCParticleLinkCollection) {
-          const auto& caloHit = assoc.getFrom();
-          if (caloHit.getCellID() != cell.getCellID())
-            continue;
-          const auto& mcp = assoc.getTo();
-          double w = assoc.getWeight(); // fraction of energy of this hit due to mcp
-          mcpEnergy[mcp.id().index] += eCell * w;
-          ecalohitsum_known += eCell * w;
-        } // end loop over hits -> MCParticle links
+        // Use detector cellID so copied cluster cells retain their truth
+        // associations, and avoid scanning every link for every cluster cell.
+        const auto found = cellParticleIndex.find(cell.getCellID());
+        if (found != cellParticleIndex.end()) {
+          for (const auto& [index_mcp, weight] : found->second) {
+            mcpEnergy[index_mcp] += eCell * weight;
+            ecalohitsum_known += eCell * weight;
+          }
+        }
       } // end loop over cluster hits
       ecalohitsum_unknown = ecalohitsum - ecalohitsum_known;
       debug() << "Calo energy in hit: all/known/unknown = " << ecalohitsum << " " << ecalohitsum_known << " "
               << ecalohitsum_unknown << endmsg;
 
       double sumw = 0.0; // for debug
-      for (const auto& mcp : *mcparticles) {
+      for (const auto& [index_mcp, energy] : mcpEnergy) {
         // create cluster<->mc particle associations
-        if (mcpEnergy[mcp.id().index] > 0) {
+        if (energy > 0) {
+          const auto& mcp = mcparticles->at(index_mcp);
           auto link = clusterMCParticleLinkCollection->create();
           link.setFrom(cluster);
           link.setTo(mcp);
-          double w = mcpEnergy[mcp.id().index] / ecalohitsum;
+          double w = energy / ecalohitsum;
           debug() << "Link with weight " << w << " set to particle " << mcp.id() << " with pdg = " << mcp.getPDG()
                   << " , energy = " << mcp.getEnergy() << endmsg;
           sumw += w;

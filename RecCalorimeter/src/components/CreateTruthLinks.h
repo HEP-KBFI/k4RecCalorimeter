@@ -1,6 +1,10 @@
 #ifndef RECCALORIMETER_CreateTruthLinks_H
 #define RECCALORIMETER_CreateTruthLinks_H
 
+#include <map>
+#include <utility>
+#include <vector>
+
 // k4FWCore
 #include "k4FWCore/DataHandle.h"
 
@@ -50,6 +54,10 @@ private:
   /// List of input cluster collections
   Gaudi::Property<std::vector<std::string>> m_clusterCollections{
       this, "clusters", {}, "Names of Cluster collections to read"};
+  /// Ignore empty or very small digitized cells before walking their truth
+  /// contributions.
+  Gaudi::Property<double> m_minCellEnergy{
+      this, "minCellEnergy", 0., "Minimum digitized calorimeter-cell energy used for truth links [GeV]"};
   /// the vector of input k4FWCore::DataHandles for the input cluster collections
   std::vector<k4FWCore::DataHandle<edm4hep::ClusterCollection>*> m_clusterCollectionHandles;
 
