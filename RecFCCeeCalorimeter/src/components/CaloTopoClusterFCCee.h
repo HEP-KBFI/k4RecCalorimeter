@@ -112,6 +112,10 @@ private:
   /// List of input cell collections
   Gaudi::Property<std::vector<std::string>> m_cellCollections{
       this, "cells", {}, "Names of CalorimeterHit collections to read"};
+  /// Optional names under which each input collection's cluster-energy sum is
+  /// stored in Cluster::shapeParameters.
+  Gaudi::Property<std::vector<std::string>> m_inputEnergyNames{
+      this, "inputEnergyNames", {}, "Shape-parameter names for per-input cluster energies"};
   /// the vector of input k4FWCore::DataHandles for the input cell collections
   std::vector<k4FWCore::DataHandle<edm4hep::CalorimeterHitCollection>*> m_cellCollectionHandles;
   // Cluster collection (output)
