@@ -93,6 +93,11 @@ StatusCode CreateTruthLinks::execute(const EventContext&) const {
 
   debug() << "Creating CaloHit <-> MCParticle links : " << endmsg;
 
+  // Channels sharing a cellID must contribute according to their digitized
+  // energy, including channels whose simulation hit has no truth contributions.
+  std::map<std::pair<int, int>, double> linkedHitEnergies;
+  std::unordered_map<uint64_t, double> cellEnergies;
+
   // loop over calo<->sim hit collection
   std::map<int, int> nhits; // map of nhits with given ID in link collections
   for (size_t ih = 0; ih < m_cell_hit_linkCollectionHandles.size(); ih++) {
@@ -108,6 +113,16 @@ StatusCode CreateTruthLinks::execute(const EventContext&) const {
       debug() << "Processing new sim <-> calo hit link: " << endmsg;
       const auto& simHit = assoc.getTo();
       const auto& caloHit = assoc.getFrom();
+      if (caloHit.getEnergy() <= m_minCellEnergy) {
+        continue;
+      }
+      const auto hitID = caloHit.id();
+      if (linkedHitEnergies.emplace(std::make_pair(hitID.collectionID, hitID.index), caloHit.getEnergy()).second) {
+        cellEnergies[caloHit.getCellID()] += caloHit.getEnergy();
+      }
+      if (simHit.getEnergy() <= 0.) {
+        continue;
+      }
       debug() << "Sim hit id and index: " << simHit.id() << " " << simHit.id().index << endmsg;
       debug() << "Calo hit id and index: " << caloHit.id() << " " << caloHit.id().index << endmsg;
       if (nhits[simHit.id().index + ih * (1 << 24)] > 0) {
@@ -535,7 +550,8 @@ StatusCode CreateTruthLinks::execute(const EventContext&) const {
         if (linkIt != cellIdToLinks.end()) {
           for (const auto& assoc : linkIt->second) {
             const auto& mcp = assoc.getTo();
-            double w = assoc.getWeight(); // fraction of energy of this hit due to mcp
+            // Energy-weight the channels when clustering merged equal cellIDs.
+            double w = assoc.getWeight() * assoc.getFrom().getEnergy() / cellEnergies.at(cell.getCellID());
             mcpEnergy[mcp.id().index] += eCell * w;
             ecalohitsum_known += eCell * w;
           }

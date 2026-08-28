@@ -89,8 +89,15 @@ StatusCode CaloTopoClusterFCCee::initialize() {
   m_decoder = new dd4hep::DDSegmentation::BitFieldCoder(m_systemEncoding);
   m_indexSystem = m_decoder->index("system");
 
+  if (!m_inputEnergyNames.value().empty() && m_inputEnergyNames.value().size() != m_cellCollections.value().size()) {
+    error() << "inputEnergyNames must be empty or have one entry per input cell collection" << endmsg;
+    return StatusCode::FAILURE;
+  }
+
   // initialise the list of metadata for the clusters
   std::vector<std::string> shapeParameterNames = {"dR_over_E"};
+  shapeParameterNames.insert(shapeParameterNames.end(), m_inputEnergyNames.value().begin(),
+                            m_inputEnergyNames.value().end());
   k4FWCore::putCollectionParameter(m_clusterCollection.objKey(), edm4hep::labels::ShapeParameterNames,
                                    shapeParameterNames, this);
 
@@ -132,8 +139,11 @@ StatusCode CaloTopoClusterFCCee::execute(const EventContext&) const {
   std::unordered_map<uint64_t, FastCell> allCells;
   allCells.reserve(2000000);
 
-  for (auto& hdl : m_cellCollectionHandles) {
-    const auto* coll = hdl->get();
+  std::vector<std::unordered_map<uint64_t, double>> inputCellEnergies(m_cellCollectionHandles.size());
+  std::unordered_map<uint64_t, double> cellErrorSquared;
+  std::unordered_multimap<uint64_t, edm4hep::CalorimeterHit> originalChannels;
+  for (size_t ih = 0; ih < m_cellCollectionHandles.size(); ++ih) {
+    const auto* coll = m_cellCollectionHandles[ih]->get();
     for (const auto& hit : *coll) {
       // cache EDM hit
       const uint64_t cID = hit.getCellID();
@@ -144,7 +154,17 @@ StatusCode CaloTopoClusterFCCee::execute(const EventContext&) const {
       auto pos = hit.getPosition();
       auto [rms, offset] = m_noiseTool->getNoisePerCell(cID);
       float sovern = (rms > 0.) ? (std::fabs(energy - offset) / rms) : 999999.;
-      allCells.emplace(cID, FastCell{cID, energy, (float)pos.x, (float)pos.y, (float)pos.z, 0, sovern});
+      if (!m_createClusterCellCollection) {
+        originalChannels.emplace(cID, hit);
+      }
+      inputCellEnergies[ih][cID] += energy;
+      cellErrorSquared[cID] += hit.getEnergyError() * hit.getEnergyError();
+      auto [it, inserted] = allCells.try_emplace(
+          cID, FastCell{cID, energy, (float)pos.x, (float)pos.y, (float)pos.z, 0, sovern});
+      if (!inserted) {
+        it->second.energy += energy;
+        it->second.SoverN = (rms > 0.) ? (std::fabs(it->second.energy - offset) / rms) : 999999.;
+      }
     }
   }
 
@@ -195,12 +215,19 @@ StatusCode CaloTopoClusterFCCee::execute(const EventContext&) const {
   for (const auto& [clusterId, cluster] : clusters) {
 
     double clusterEnergy = 0.;
+    std::vector<double> clusterInputEnergies(m_cellCollectionHandles.size(), 0.);
     std::unordered_map<int, int> system;
     system.reserve(4);
 
     for (const auto& fastcell : cluster) {
 
       clusterEnergy += fastcell.energy;
+      for (size_t ih = 0; ih < inputCellEnergies.size(); ++ih) {
+        const auto it = inputCellEnergies[ih].find(fastcell.cellID);
+        if (it != inputCellEnergies[ih].end()) {
+          clusterInputEnergies[ih] += it->second;
+        }
+      }
       auto systemId = m_decoder->get(fastcell.cellID, m_indexSystem);
       system[int(systemId)]++;
     }
@@ -268,11 +295,17 @@ StatusCode CaloTopoClusterFCCee::execute(const EventContext&) const {
 
         auto newcell = cell.clone();
         newcell.setType(fastcell.type);
+        newcell.setEnergy(fastcell.energy);
+        newcell.setEnergyError(std::sqrt(cellErrorSquared.at(fastcell.cellID)));
         outClusterCells->push_back(newcell);
         outCluster.addToHits(newcell);
 
       } else {
-        outCluster.addToHits(cell);
+        // Retain every original channel when no combined cell collection is requested.
+        const auto [begin, end] = originalChannels.equal_range(fastcell.cellID);
+        for (auto it = begin; it != end; ++it) {
+          outCluster.addToHits(it->second);
+        }
       }
     }
 
@@ -294,6 +327,11 @@ StatusCode CaloTopoClusterFCCee::execute(const EventContext&) const {
       outCluster.addToShapeParameters(0.0);
     }
 
+    if (!m_inputEnergyNames.value().empty()) {
+      for (const auto energy : clusterInputEnergies) {
+        outCluster.addToShapeParameters(energy);
+      }
+    }
     outClusters->push_back(outCluster);
 
     if (system.size() > 1)

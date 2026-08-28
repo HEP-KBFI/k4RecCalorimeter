@@ -50,6 +50,9 @@ private:
   /// List of input cluster collections
   Gaudi::Property<std::vector<std::string>> m_clusterCollections{
       this, "clusters", {}, "Names of Cluster collections to read"};
+  /// Skip empty digitized cells before traversing their simulation contributions.
+  Gaudi::Property<double> m_minCellEnergy{
+      this, "minCellEnergy", 0., "Minimum digitized calorimeter-cell energy used for truth links [GeV]"};
   /// the vector of input k4FWCore::DataHandles for the input cluster collections
   std::vector<k4FWCore::DataHandle<edm4hep::ClusterCollection>*> m_clusterCollectionHandles;
 
