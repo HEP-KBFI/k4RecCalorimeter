@@ -97,6 +97,7 @@ StatusCode SimulateSiPMwithOpticalPhoton::execute(const EventContext&) const {
   // Create output collections
   edm4hep::TimeSeriesCollection* waveforms = m_waveforms.createAndPut();
   edm4hep::CalorimeterHitCollection* digiHits = m_digiHits.createAndPut();
+  edm4hep::CaloHitSimCaloHitLinkCollection* hitLinks = m_hitLinks.createAndPut();
 
   // Process each hit
   for (unsigned int idx = 0; idx < timeStructs->size(); idx++) {
@@ -192,6 +193,9 @@ StatusCode SimulateSiPMwithOpticalPhoton::execute(const EventContext&) const {
 
     auto digiHit = digiHits->create();
     auto waveform = waveforms->create();
+    auto hitLink = hitLinks->create();
+    hitLink.setFrom(digiHit);
+    hitLink.setTo(simHit);
 
     // Get the analog signal from the SiPM
     const sipm::SiPMAnalogSignal anaSignal = m_sensor->signal();

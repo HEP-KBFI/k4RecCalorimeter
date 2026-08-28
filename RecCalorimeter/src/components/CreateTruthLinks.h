@@ -49,6 +49,11 @@ private:
   /// List of input cluster collections
   Gaudi::Property<std::vector<std::string>> m_clusterCollections{
     this, "clusters", {}, "Names of Cluster collections to read"};
+  /// Ignore empty or very small digitized cells before walking their truth
+  /// contributions. This is particularly important for IDEA, where the SiPM
+  /// digitizer retains a zero-energy output hit for every simulated cell.
+  Gaudi::Property<double> m_minCellEnergy{
+    this, "minCellEnergy", 0., "Minimum digitized calorimeter-cell energy used for truth links [GeV]"};
   /// the vector of input k4FWCore::DataHandles for the input cluster collections
   std::vector<k4FWCore::DataHandle<edm4hep::ClusterCollection>*> m_clusterCollectionHandles;
 

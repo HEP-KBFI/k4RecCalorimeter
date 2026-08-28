@@ -86,8 +86,17 @@ StatusCode CaloTopoClusterFCCee::initialize() {
   m_decoder = new dd4hep::DDSegmentation::BitFieldCoder(m_systemEncoding);
   m_indexSystem = m_decoder->index("system");
 
-  // initialise the list of metadata for the clusters
+  if (!m_inputEnergyNames.value().empty() && m_inputEnergyNames.value().size() != m_cellCollections.value().size()) {
+    error() << "inputEnergyNames must be empty or have one entry per input cell collection" << endmsg;
+    return StatusCode::FAILURE;
+  }
+
+  // Initialise the list of metadata for the clusters. Per-input energies let
+  // dual-readout clients distinguish the Cherenkov and scintillation signals
+  // while retaining a single set of physical topological clusters.
   std::vector<std::string> shapeParameterNames = {"dR_over_E"};
+  shapeParameterNames.insert(shapeParameterNames.end(), m_inputEnergyNames.value().begin(),
+                             m_inputEnergyNames.value().end());
   m_shapeParametersHandle.put(shapeParameterNames);
 
   if (m_createClusterCellCollection) {
@@ -121,19 +130,31 @@ StatusCode CaloTopoClusterFCCee::execute(const EventContext&) const {
     outClusterCells = m_clusterCellsCollection.createAndPut();
   }
 
-  // Get input collection with calorimeter cells
+  // Get input collections and merge equal physical cell IDs for topology.
+  // Dual-readout collections contain separate measurements of the same cell;
+  // keeping both as independent topology cells makes the result depend on
+  // input order because buildProtoClusters indexes cells only by cellID.
   edm4hep::CalorimeterHitCollection* inCells = new edm4hep::CalorimeterHitCollection();
+  std::unordered_map<uint64_t, edm4hep::MutableCalorimeterHit> combinedCells;
+  std::vector<std::unordered_map<uint64_t, double>> inputCellEnergies(m_cellCollectionHandles.size());
   for (size_t ih = 0; ih < m_cellCollectionHandles.size(); ih++) {
     verbose() << "Processing collection " << ih << endmsg;
     const edm4hep::CalorimeterHitCollection* coll = m_cellCollectionHandles[ih]->get();
     for (const auto& hit : *coll) {
-      auto newCell = hit.clone();
-      newCell.setType(0); // topoclustering will set the type of clustered cells to 1-2-3 depending whether they are
-                          // seed/neighbours/last neighbours
-      // note that this overwrites the type information from the digitiser, which encodes calorimeter type / layout /
-      // layer
-      inCells->push_back(newCell);
+      const auto cellID = hit.getCellID();
+      inputCellEnergies[ih][cellID] += hit.getEnergy();
+      auto [cellIt, inserted] = combinedCells.try_emplace(cellID, hit.clone());
+      if (inserted) {
+        cellIt->second.setEnergy(0.);
+        cellIt->second.setEnergyError(0.);
+        cellIt->second.setType(0); // set to seed/neighbour/last-neighbour later
+      }
+      cellIt->second.setEnergy(cellIt->second.getEnergy() + hit.getEnergy());
+      cellIt->second.setEnergyError(std::hypot(cellIt->second.getEnergyError(), hit.getEnergyError()));
     }
+  }
+  for (const auto& [cellID, cell] : combinedCells) {
+    inCells->push_back(cell);
   }
   if (inCells->empty()) {
     debug() << "No active cells, skipping event..." << endmsg;
@@ -165,8 +186,15 @@ StatusCode CaloTopoClusterFCCee::execute(const EventContext&) const {
 
     // calculate cluster energy and decide whether to keep it
     double clusterEnergy = 0.;
+    std::vector<double> clusterInputEnergies(m_cellCollectionHandles.size(), 0.);
     for (const auto& protoCell : protoCluster.second) {
       clusterEnergy += protoCell.getEnergy();
+      for (size_t ih = 0; ih < inputCellEnergies.size(); ++ih) {
+        const auto energyIt = inputCellEnergies[ih].find(protoCell.getCellID());
+        if (energyIt != inputCellEnergies[ih].end()) {
+          clusterInputEnergies[ih] += energyIt->second;
+        }
+      }
     }
     verbose() << "Cluster energy:     " << clusterEnergy << endmsg;
     checkTotEnergy += clusterEnergy;
@@ -236,6 +264,11 @@ StatusCode CaloTopoClusterFCCee::execute(const EventContext&) const {
                 cellEnergy[i];
     }
     cluster.addToShapeParameters(deltaR / clusterEnergy);
+    if (!m_inputEnergyNames.value().empty()) {
+      for (const auto energy : clusterInputEnergies) {
+        cluster.addToShapeParameters(energy);
+      }
+    }
 
     outClusters->push_back(cluster);
     if (system.size() > 1)
