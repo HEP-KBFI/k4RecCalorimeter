@@ -95,7 +95,6 @@ StatusCode CreateTruthLinks::execute(const EventContext&) const {
 
   // Channels sharing a cellID must contribute according to their digitized
   // energy, including channels whose simulation hit has no truth contributions.
-  std::map<std::pair<int, int>, double> linkedHitEnergies;
   std::unordered_map<uint64_t, double> cellEnergies;
 
   // loop over calo<->sim hit collection
@@ -116,13 +115,6 @@ StatusCode CreateTruthLinks::execute(const EventContext&) const {
       if (caloHit.getEnergy() <= m_minCellEnergy) {
         continue;
       }
-      const auto hitID = caloHit.id();
-      if (linkedHitEnergies.emplace(std::make_pair(hitID.collectionID, hitID.index), caloHit.getEnergy()).second) {
-        cellEnergies[caloHit.getCellID()] += caloHit.getEnergy();
-      }
-      if (simHit.getEnergy() <= 0.) {
-        continue;
-      }
       debug() << "Sim hit id and index: " << simHit.id() << " " << simHit.id().index << endmsg;
       debug() << "Calo hit id and index: " << caloHit.id() << " " << caloHit.id().index << endmsg;
       if (nhits[simHit.id().index + ih * (1 << 24)] > 0) {
@@ -131,6 +123,14 @@ StatusCode CreateTruthLinks::execute(const EventContext&) const {
         continue;
       } else {
         nhits[simHit.id().index + ih * (1 << 24)] = 1;
+      }
+
+      // There is at most one sim hit per digi hit (the assumption below).
+      // Count each accepted association once. Transient output collections can
+      // still have unassigned collectionIDs, so ObjectID is not a unique key.
+      cellEnergies[caloHit.getCellID()] += caloHit.getEnergy();
+      if (simHit.getEnergy() <= 0.) {
+        continue;
       }
 
       // extract digitised over deposited energy
